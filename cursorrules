@@ -1,0 +1,246 @@
+You are an expert in Python, FastAPI, SQLModel, and scalable API development.
+
+Key Principles
+- Write concise, technical responses with accurate Python examples.
+- Prefer modularization over code duplication.
+- Use descriptive variable names with auxiliary verbs (e.g., is_active, has_permission).
+- Use lowercase with underscores for directories and files (e.g., routers/user_routes.py).
+- Follow PEP 8 style guidelines for Python code.
+- CRITICAL: NO EMOTICONS/EMOJIS in API responses, error messages, log messages, or user-facing text. Use clear, professional text only. Emoticons acceptable ONLY in debug print() statements during development.
+
+Python/FastAPI/SQLModel
+- Use def for route handlers with synchronous Session dependencies.
+- Use async def only for WebSocket handlers or background tasks.
+- Use type hints for all function signatures.
+- Use SQLModel for database models (inheriting from SQLModel, table=True).
+- Use Pydantic BaseModel for request/response schemas that don't map to tables.
+- File structure: routers/, models.py, database.py, schemas (if needed).
+- Import Session from sqlmodel, not sqlalchemy.
+
+Database & ORM
+- Use SQLModel 0.0.8 (built on SQLAlchemy 1.4 + Pydantic v1).
+- Use synchronous Session from get_session dependency injection.
+- Use select() for queries with session.exec(), not raw SQL.
+- Use selectinload() and joinedload() for eager loading relationships to avoid N+1 queries.
+- Use Alembic for ALL database schema changes - never modify models without migrations.
+- For backward compatibility when renaming columns: use sa_column_kwargs={"name": "old_column_name"} in Field().
+
+Error Handling and Validation
+- Handle errors at the beginning of functions with early returns.
+- Use HTTPException for expected errors with appropriate status codes (404, 400, 422, etc.).
+- Use guard clauses for preconditions and invalid states.
+- Validate input with Pydantic models and SQLModel validators (@validator, @root_validator).
+- Log errors appropriately for debugging and monitoring.
+
+Alembic Migration Best Practices
+- Always create migrations for schema changes: alembic revision --autogenerate -m "descriptive_message"
+- For data migrations (updating existing data): use op.execute() with SQL statements.
+- Always implement both upgrade() and downgrade() functions for reversibility.
+- Test migrations on development database before applying to production.
+- Use descriptive migration messages that explain what changed.
+- Never edit existing migration files after they've been applied to production.
+- Use op.execute() for batch updates, not ORM operations in migrations.
+
+Dependencies
+- FastAPI 0.68.2
+- SQLModel 0.0.8 (combines SQLAlchemy 1.4 + Pydantic v1)
+- Alembic 1.13.1 (database migrations)
+- PostgreSQL (production database)
+- python-multipart (file uploads)
+- python-dotenv (environment variables)
+
+Response Model Patterns
+- Define Shallow models in models.py for lightweight API responses (e.g., VendorShallow, ComponentShallow).
+- Shallow models contain only essential fields (typically id, name) without full relationships.
+- Use eager loading with selectinload() in route handlers to load all related data in ONE query.
+- Manually construct Shallow model instances from eagerly loaded relationships.
+- Nest Shallow models within response models (e.g., JobRead.contract = ContractShallow).
+- Pattern: (1) Eager load with selectinload(), (2) Build Shallow models, (3) Return lightweight response.
+- This prevents N+1 queries while keeping responses small and predictable.
+- Always use .from_orm() or direct construction for Shallow models, never return full ORM objects.
+
+Example Pattern:
+# Step 1: Eager load all relationships
+statement = select(Jobs).options(
+    selectinload(Jobs.contract).selectinload(Contracts.vendor),
+    selectinload(Jobs.contract).selectinload(Contracts.bid)
+    .selectinload(Bids.request).selectinload(Requests.inspection)
+    .selectinload(Inspections.component).selectinload(Components.entity)
+    .selectinload(Entities.property)
+)
+jobs = session.exec(statement).all()
+
+# Step 2: Build Shallow models from eagerly loaded data
+for job in jobs:
+    vendor_shallow = VendorShallow(
+        id=job.contract.vendor.id,
+        name=job.contract.vendor.name
+    )
+    contract_shallow = ContractShallow(
+        id=job.contract.id,
+        total_value=job.contract.total_value,
+        vendor=vendor_shallow  # Nested shallow
+    )
+    
+    # Step 3: Attach to response model
+    job_read = JobRead.from_orm(job)
+    job_read.contract = contract_shallow
+    result.append(job_read)
+
+return result  # Lightweight, optimized response
+
+Performance Optimization
+- Use selectinload() to avoid N+1 queries when loading relationships.
+- Use indexes on frequently queried columns (defined in Alembic migrations).
+- Implement pagination (limit/offset) for all list endpoints.
+- Use Query parameter defaults: limit=50, offset=0.
+- Cache static/reference data where appropriate.
+- Use database-level constraints for data integrity.
+
+FastAPI-Specific Guidelines
+- Use APIRouter with prefix and tags for organizing endpoints.
+- Use Depends() for dependency injection (database sessions, auth, etc.).
+- Use response_model for type-safe responses.
+- Use status_code parameter for non-200 success responses.
+- Use Body(), Query(), Path() for explicit parameter documentation.
+- CRITICAL: For array query parameters, use: param: Optional[List[str]] = Query(None)
+  - FastAPI automatically handles duplicate keys: ?status=a&status=b → ['a', 'b']
+  - Use .in_() for SQL queries: statement.where(Model.field.in_(param))
+- Implement CORS middleware for cross-origin requests.
+- Use middleware for logging, error monitoring, and performance tracking.
+
+Middleware Best Practices (CRITICAL)
+- Middleware processes EVERY request before it reaches route handlers
+- When working with query parameters in middleware:
+  - NEVER use dict(request.query_params) - loses duplicate keys!
+  - ALWAYS use request.query_params.multi_items() to preserve array params
+  - Example: ?status=a&status=b correctly becomes [('status', 'a'), ('status', 'b')]
+- Common middleware use cases: auth, logging, CORS, parameter cleaning, rate limiting
+- Test middleware thoroughly - bugs affect ALL endpoints
+- Example of correct parameter handling:
+  ```python
+  class CleanParametersMiddleware(BaseHTTPMiddleware):
+      async def dispatch(self, request: Request, call_next):
+          if request.query_params:
+              # Use multi_items() to preserve duplicate keys
+              params = request.query_params.multi_items()
+              cleaned_params = []
+              
+              for key, value in params:
+                  if isinstance(value, str):
+                      cleaned_value = value.strip()
+                      cleaned_params.append((key, cleaned_value))
+                  else:
+                      cleaned_params.append((key, value))
+              
+              # Reconstruct query string
+              query_string = urlencode(cleaned_params)
+              scope = request.scope.copy()
+              scope["query_string"] = query_string.encode()
+              request = Request(scope, request.receive)
+          
+          return await call_next(request)
+  ```
+
+Key Conventions
+1. Keep business logic in models and validators, not in route handlers.
+2. Keep routers focused on request/response handling and orchestration.
+3. Use dependency injection (Depends) for shared resources like database sessions.
+4. Follow RESTful conventions for API endpoints.
+5. Use WebSockets for real-time updates (websocket_handler.py).
+6. Return appropriate HTTP status codes for different scenarios.
+
+Project-Specific Terminology
+- entry_source field values: "direct_approve", "contract_awarded", "direct_assignment", "emergency"
+- Request workflow stages: PENDING → IN_REVISION → APPROVED → DIRECT_APPROVED → NOT_APPROVED → WISHLISTED
+- Job workflow: Request → (Bidding → Contract) OR (Direct Approve) → Job
+- Direct Approve workflow: Skips bidding and contract stages, creates job immediately from inspection
+- Components: Specific items being tracked (e.g., HVAC units, roofs)
+- Entities: Groups of components (e.g., Building A, Pool)
+- Properties: Physical locations with entities and components
+
+Database Schema Patterns
+- Use foreign keys with nullable=True for optional relationships.
+- Use Relationship() for SQLModel relationships with back_populates.
+- For complex foreign keys, use sa_relationship_kwargs={"foreign_keys": "[Table.column]"}.
+- Enum fields should use Python Enum classes and string values in database.
+- Use Decimal type for monetary values, not Float.
+- Use date type for dates, datetime for timestamps with timezone.
+- Default timestamps: created_at uses server_default=func.now().
+
+Security Best Practices
+- Use CORS middleware with appropriate origins.
+- Validate all user input with Pydantic/SQLModel.
+- Use foreign key constraints for referential integrity.
+- Sanitize database queries (SQLModel ORM handles this automatically).
+- Use parameterized queries for any raw SQL (op.execute with parameters).
+- Implement proper authentication and authorization (check user permissions).
+
+Testing and Quality
+- Test all database migrations on development environment first.
+- Verify foreign key relationships work correctly.
+- Test API endpoints with various input scenarios (happy path and error cases).
+- Use type hints to catch errors early with mypy or similar tools.
+
+WebSocket Real-Time Updates
+- Use WebSocket connections for real-time data synchronization.
+- Broadcast events when entities are created, updated, or deleted.
+- Event format: entity_type, action, data (e.g., "requests", "created", {...}).
+- Handle WebSocket connection lifecycle properly (connect/disconnect).
+
+Dedicated Backend Endpoints (Server-Side Filtering)
+- PREFER creating dedicated backend endpoints over loading large datasets for client-side filtering.
+- When the frontend needs filtered/joined/grouped data, do the work in SQL, not JavaScript.
+- Use raw SQL with text() for complex joins across multiple tables -- raw SQL is acceptable and preferred for read-only aggregation endpoints.
+- Return only the fields the frontend actually needs, not full ORM objects.
+- Group/aggregate in SQL rather than returning flat lists for the frontend to process.
+- Example: Instead of loading 1300 components + 1000 entities + 1140 automated requests and filtering client-side, create one endpoint that returns the ~800 results the frontend actually needs.
+- Pattern: (1) Identify what the frontend displays, (2) Write a SQL query that returns exactly that, (3) Return minimal dict/list response.
+- Naming convention: Use descriptive endpoint paths like /api/queue/uninspected-components, /jobs/stats, /contracts/pending-jobs.
+- These endpoints should be GET requests with optional query parameters for filtering.
+- Cache consideration: Frontend should cache these responses with zustandQuery (staleTime 5-10 minutes).
+
+Anti-patterns to avoid:
+- Don't make the frontend load ALL records (limit: 10000) just to filter/count on the client.
+- Don't require 3+ API calls that the frontend must combine -- create a single endpoint instead.
+- Don't load full entity relationships when you only need counts or IDs.
+- Don't derive filter options client-side from full datasets -- provide them from the backend.
+
+Timezone Handling (CRITICAL - Utah Time)
+- The app serves Utah-based users. The backend runs on Azure (UTC).
+- NEVER use date.today(), datetime.now(), or datetime.utcnow() directly.
+- ALWAYS use utah_today() and utah_now() from app.utils.date_utils.
+- Import: from app.utils.date_utils import utah_today, utah_now (or relative: from ..utils.date_utils)
+- utah_today() returns date in America/Denver timezone.
+- utah_now() returns timezone-aware datetime in America/Denver timezone.
+- UTAH_TZ (ZoneInfo("America/Denver")) is available for APScheduler and other timezone needs.
+- For TIMESTAMPTZ columns: utah_now() is safe (PostgreSQL converts to UTC internally).
+- For date-only columns and business logic: utah_today() ensures correct Utah date.
+- APScheduler CronTrigger must use timezone=UTAH_TZ so jobs run at Utah time, not UTC.
+- func.now() server_default is fine for created_at/updated_at (PostgreSQL handles UTC correctly).
+- Exception: Test files (test_*.py) may use date.today() for test fixtures since timezone doesn't matter for unit tests.
+
+Common Pitfalls to Avoid
+- Don't use raw SQL unless absolutely necessary (use SQLModel ORM) -- EXCEPTION: raw SQL is fine for read-only aggregation/reporting endpoints where ORM would require excessive joins or N+1 queries.
+- Don't forget to add relationships when creating foreign keys.
+- Don't modify database schema without creating Alembic migrations.
+- Don't use Float for money - always use Decimal.
+- Don't forget to add indexes for frequently queried columns.
+- Don't use async def for routes when using synchronous Session.
+- Don't forget selectinload() when accessing related objects in loops.
+- Don't return full ORM objects with all relationships - use Shallow models for responses.
+- Don't lazy load relationships in loops - eager load with selectinload() upfront.
+- CRITICAL: Don't use dict(request.query_params) in middleware - loses duplicate keys for array params.
+- Don't make the frontend load thousands of records for client-side filtering -- create a dedicated backend endpoint.
+- CRITICAL: Don't use date.today() or datetime.now() -- use utah_today() and utah_now() from date_utils.
+
+Documentation
+- Project documentation located in docs/ directory.
+- Key guides: RESPONSE_MODEL_PATTERN.md, CODEBASE_EVALUATION.md, SETUP_PRODUCTION_ENV.md.
+- Migration guides: FAST_TRACK_TO_DIRECT_APPROVE_RENAME.md, RESMAN_INTEGRATION_SUMMARY.md.
+- Session summaries: Track progress and decisions made.
+- NEVER create new .md files in root directory - always put them in docs/ folder.
+- Only exception: README.md can stay in root.
+
+Refer to FastAPI documentation for API development best practices and SQLModel documentation for ORM patterns.
+
